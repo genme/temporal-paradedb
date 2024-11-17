@@ -1,0 +1,3 @@
+- [ ] Finalize query converter, tests
+- [ ] Rework a bit original design related to visibility store
+- [ ] Docs
