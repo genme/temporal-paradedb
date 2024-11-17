@@ -128,3 +128,16 @@ func formatComparisonExprStringForError(expr sqlparser.ComparisonExpr) string {
 	}
 	return sqlparser.String(&expr)
 }
+
+func getFieldName(expr sqlparser.Expr) string {
+	switch e := expr.(type) {
+	case *sqlparser.ColName:
+		return e.Name.String()
+	case *saColName:
+		return e.fieldName
+	case *colName:
+		return e.Name
+	default:
+		return ""
+	}
+}

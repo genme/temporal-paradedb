@@ -24,18 +24,16 @@ package visibility
 
 import (
 	"fmt"
-	"strings"
-
 	"github.com/temporalio/sqlparser"
-
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 	"go.temporal.io/server/common/persistence/visibility/store/query"
 	"go.temporal.io/server/common/searchattribute"
+	"strings"
 )
 
 type (
-	queryConverter struct{}
+	paradedbQueryConverter struct{}
 )
 
 const (
@@ -50,7 +48,7 @@ func newParadeDBQueryConverter(
 	queryString string,
 ) *QueryConverter {
 	return newQueryConverterInternal(
-		&queryConverter{},
+		&paradedbQueryConverter{},
 		namespaceName,
 		namespaceID,
 		saTypeMap,
@@ -59,7 +57,7 @@ func newParadeDBQueryConverter(
 	)
 }
 
-func (c *queryConverter) convertKeywordListComparisonExpr(
+func (c *paradedbQueryConverter) convertKeywordListComparisonExpr(
 	expr *sqlparser.ComparisonExpr,
 ) (sqlparser.Expr, error) {
 	if !isSupportedKeywordListOperator(expr.Operator) {
@@ -105,7 +103,7 @@ func (c *queryConverter) convertKeywordListComparisonExpr(
 	}
 }
 
-func (c *queryConverter) convertInExpr(
+func (c *paradedbQueryConverter) convertInExpr(
 	leftExpr sqlparser.Expr,
 	values sqlparser.ValTuple,
 ) sqlparser.Expr {
@@ -131,7 +129,7 @@ func (c *queryConverter) convertInExpr(
 	return exprs[0]
 }
 
-func (c *queryConverter) convertTextComparisonExpr(
+func (c *paradedbQueryConverter) convertTextComparisonExpr(
 	expr *sqlparser.ComparisonExpr,
 ) (sqlparser.Expr, error) {
 	if !isSupportedTextOperator(expr.Operator) {
@@ -157,7 +155,7 @@ func (c *queryConverter) convertTextComparisonExpr(
 	return sqlparser.NewStrVal([]byte(query)), nil
 }
 
-func (c *queryConverter) buildSelectStmt(
+func (c *paradedbQueryConverter) buildSelectStmt(
 	namespaceID namespace.ID,
 	queryString string,
 	pageSize int,
@@ -177,6 +175,7 @@ func (c *queryConverter) buildSelectStmt(
 	}
 
 	if token != nil {
+		// TODO btree indexes
 		whereClauses = append(
 			whereClauses,
 			fmt.Sprintf(
@@ -201,7 +200,7 @@ func (c *queryConverter) buildSelectStmt(
 	}
 
 	queryArgs = append(queryArgs, pageSize)
-
+	// TODO table name
 	return fmt.Sprintf(
 		`SELECT %s
 		FROM executions_visibility
@@ -216,7 +215,7 @@ func (c *queryConverter) buildSelectStmt(
 	), queryArgs
 }
 
-func (c *queryConverter) buildCountStmt(
+func (c *paradedbQueryConverter) buildCountStmt(
 	namespaceID namespace.ID,
 	queryString string,
 	groupBy []string,
@@ -247,11 +246,11 @@ func (c *queryConverter) buildCountStmt(
 	), queryArgs
 }
 
-func (c *queryConverter) getDatetimeFormat() string {
+func (c *paradedbQueryConverter) getDatetimeFormat() string {
 	return "2006-01-02 15:04:05.999999"
 }
 
-func (c *queryConverter) getCoalesceCloseTimeExpr() sqlparser.Expr {
+func (c *paradedbQueryConverter) getCoalesceCloseTimeExpr() sqlparser.Expr {
 	return newFuncExpr(
 		"COALESCE",
 		closeTimeSaColName,
@@ -259,27 +258,15 @@ func (c *queryConverter) getCoalesceCloseTimeExpr() sqlparser.Expr {
 	)
 }
 
-func (c *queryConverter) newJsonContainsExpr(
+func (c *paradedbQueryConverter) newJsonContainsExpr(
 	jsonExpr sqlparser.Expr,
 	valueExpr sqlparser.Expr,
 ) sqlparser.Expr {
-	return sqlparser.NewStrVal([]byte(fmt.Sprintf(
+	query := fmt.Sprintf(
 		"id %s paradedb.json_term('search_attributes', '$.%s', %s)",
 		bm25Operator,
 		getFieldName(jsonExpr),
 		sqlparser.String(valueExpr),
-	)))
-}
-
-func getFieldName(expr sqlparser.Expr) string {
-	switch e := expr.(type) {
-	case *sqlparser.ColName:
-		return e.Name.String()
-	case *saColName:
-		return e.fieldName
-	case *colName:
-		return e.Name
-	default:
-		return ""
-	}
+	)
+	return sqlparser.NewStrVal([]byte(query))
 }

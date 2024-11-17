@@ -29,16 +29,8 @@ CREATE TABLE pdb_executions_visibility
     PRIMARY KEY (namespace_id, run_id)
 );
 
--- Search attributes table
-CREATE TABLE pdb_custom_search_attributes
-(
-    namespace_id      CHAR(64) NOT NULL,
-    run_id            CHAR(64) NOT NULL,
-    search_attributes JSONB    NULL, -- Changed from JSON to JSONB for better performance
-    PRIMARY KEY (namespace_id, run_id)
-);
-
 -- Main visibility index with fast fields
+-- TODO WIP
 CALL paradedb.create_bm25(
         index_name => 'pdb_executions_visibility_idx',
         table_name => 'pdb_executions_visibility',
@@ -66,12 +58,3 @@ CALL paradedb.create_bm25(
      );
 
 
--- Custom search attributes index - simple JSON indexing
-CALL paradedb.create_bm25(
-        index_name => 'pdb_custom_search_attributes_idx',
-        table_name => 'pdb_custom_search_attributes',
-        key_field => 'run_id',
-        json_fields => ARRAY [
-            paradedb.field('search_attributes')
-            ]
-     );
