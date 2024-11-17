@@ -1,5 +1,6 @@
 - [ ] Finalize query converter, tests
 - [ ] Rework a bit an original design related to visibility store
+- [ ] Linters, make, etc
 - [ ] Docs
 - [ ] Dev infra
 - [ ] Benchmarks
