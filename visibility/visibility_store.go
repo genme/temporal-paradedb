@@ -22,7 +22,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package sql
+package visibility
 
 import (
 	"context"
@@ -53,6 +53,7 @@ type (
 		sqlStore                       persistencesql.SqlStore
 		searchAttributesProvider       searchattribute.Provider
 		searchAttributesMapperProvider searchattribute.MapperProvider
+		queryConverterFactory          QueryConverterFactory
 	}
 )
 
@@ -68,6 +69,7 @@ func NewSQLVisibilityStore(
 	searchAttributesMapperProvider searchattribute.MapperProvider,
 	logger log.Logger,
 	metricsHandler metrics.Handler,
+	queryConverter QueryConverterFactory,
 ) (*VisibilityStore, error) {
 	refDbConn := persistencesql.NewRefCountedDBConn(sqlplugin.DbKindVisibility, &cfg, r, logger, metricsHandler)
 	db, err := refDbConn.Get()
@@ -78,6 +80,7 @@ func NewSQLVisibilityStore(
 		sqlStore:                       persistencesql.NewSqlStore(db, logger),
 		searchAttributesProvider:       searchAttributesProvider,
 		searchAttributesMapperProvider: searchAttributesMapperProvider,
+		queryConverterFactory:          queryConverter,
 	}, nil
 }
 
@@ -195,7 +198,7 @@ func (s *VisibilityStore) ListWorkflowExecutions(
 		return nil, err
 	}
 
-	converter := NewQueryConverter(
+	converter := s.queryConverterFactory.NewQueryConverter(
 		s.GetName(),
 		request.Namespace,
 		request.NamespaceID,
@@ -273,7 +276,7 @@ func (s *VisibilityStore) CountWorkflowExecutions(
 		return nil, err
 	}
 
-	converter := NewQueryConverter(
+	converter := s.queryConverterFactory.NewQueryConverter(
 		s.GetName(),
 		request.Namespace,
 		request.NamespaceID,

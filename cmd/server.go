@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/genme/temporal-paradedb/pkg/visibility"
+	"github.com/genme/temporal-paradedb/visibility"
 	stdlog "log"
 	"os"
 	"path"
@@ -190,6 +190,7 @@ func buildCLI() *cli.App {
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("Unable to instantiate claim mapper: %v.", err), 1)
 				}
+
 				s, err := temporal.NewServer(
 					temporal.ForServices(services),
 					temporal.WithConfig(cfg),
@@ -200,7 +201,7 @@ func buildCLI() *cli.App {
 					temporal.WithClaimMapper(func(cfg *config.Config) authorization.ClaimMapper {
 						return claimMapper
 					}),
-					temporal.WithCustomVisibilityStoreFactory(visibility.NewVisibilityStoreFactory()),
+					temporal.WithCustomVisibilityStoreFactory(visibility.CustomSqlVisibilityFactory(visibility.NewParadeDbConverterFactory())),
 				)
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("Unable to create server. Error: %v.", err), 1)

@@ -1,8 +1,6 @@
 // The MIT License
 //
-// Copyright (c) 2020 Temporal Technologies Inc.  All rights reserved.
-//
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2024 vivaneiona
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,32 +20,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package sql
+package visibility
 
 import (
 	"go.temporal.io/server/common/namespace"
-	"go.temporal.io/server/common/persistence/sql/sqlplugin/mysql"
-	"go.temporal.io/server/common/persistence/sql/sqlplugin/postgresql"
-	"go.temporal.io/server/common/persistence/sql/sqlplugin/sqlite"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 	"go.temporal.io/server/common/searchattribute"
 )
 
-func NewQueryConverter(
-	pluginName string,
-	namespaceName namespace.Name,
-	namespaceID namespace.ID,
-	saTypeMap searchattribute.NameTypeMap,
-	saMapper searchattribute.Mapper,
-	queryString string,
-) *QueryConverter {
-	switch pluginName {
-	case mysql.PluginName:
-		return newMySQLQueryConverter(namespaceName, namespaceID, saTypeMap, saMapper, queryString)
-	case postgresql.PluginName, postgresql.PluginNamePGX:
-		return newPostgreSQLQueryConverter(namespaceName, namespaceID, saTypeMap, saMapper, queryString)
-	case sqlite.PluginName:
-		return newSqliteQueryConverter(namespaceName, namespaceID, saTypeMap, saMapper, queryString)
-	default:
-		return nil
-	}
+// Converter TODO refactor — simplify design and decouple everything etc
+type Converter interface {
+	PluginQueryConverter
+	BuildCountStmt() (*sqlplugin.VisibilitySelectFilter, error)
+	BuildSelectStmt(
+		pageSize int,
+		nextPageToken []byte,
+	) (*sqlplugin.VisibilitySelectFilter, error)
+}
+
+type QueryConverterFactory interface {
+	NewQueryConverter(
+		pluginName string,
+		namespaceName namespace.Name,
+		namespaceID namespace.ID,
+		saTypeMap searchattribute.NameTypeMap,
+		saMapper searchattribute.Mapper,
+		queryString string,
+	) Converter
 }

@@ -1,5 +1,7 @@
 // The MIT License
 //
+// Copyright (c) 2024 vivaneiona
+//
 // Copyright (c) 2020 Temporal Technologies Inc.  All rights reserved.
 //
 // Copyright (c) 2020 Uber Technologies, Inc.
@@ -22,7 +24,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package sql
+package visibility
 
 import (
 	"errors"
@@ -41,7 +43,7 @@ import (
 )
 
 type (
-	pluginQueryConverter interface {
+	PluginQueryConverter interface {
 		convertKeywordListComparisonExpr(expr *sqlparser.ComparisonExpr) (sqlparser.Expr, error)
 
 		convertTextComparisonExpr(expr *sqlparser.ComparisonExpr) (sqlparser.Expr, error)
@@ -61,7 +63,7 @@ type (
 	}
 
 	QueryConverter struct {
-		pluginQueryConverter
+		PluginQueryConverter
 		namespaceName namespace.Name
 		namespaceID   namespace.ID
 		saTypeMap     searchattribute.NameTypeMap
@@ -135,7 +137,7 @@ var (
 )
 
 func newQueryConverterInternal(
-	pqc pluginQueryConverter,
+	pqc PluginQueryConverter,
 	namespaceName namespace.Name,
 	namespaceID namespace.ID,
 	saTypeMap searchattribute.NameTypeMap,
@@ -143,7 +145,7 @@ func newQueryConverterInternal(
 	queryString string,
 ) *QueryConverter {
 	return &QueryConverter{
-		pluginQueryConverter: pqc,
+		PluginQueryConverter: pqc,
 		namespaceName:        namespaceName,
 		namespaceID:          namespaceID,
 		saTypeMap:            saTypeMap,

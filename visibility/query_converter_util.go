@@ -22,15 +22,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package sql
+package visibility
 
 import (
-	"strings"
 	"time"
 
 	"github.com/temporalio/sqlparser"
 	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/server/common/persistence/visibility/store/query"
 	"go.temporal.io/server/common/searchattribute"
 )
 
@@ -54,10 +52,6 @@ type (
 		fieldName string
 		valueType enumspb.IndexedValueType
 	}
-)
-
-const (
-	coalesceFuncName = "coalesce"
 )
 
 var _ sqlparser.Expr = (*unsafeSQLString)(nil)
@@ -120,14 +114,6 @@ func newFuncExpr(name string, exprs ...sqlparser.Expr) *sqlparser.FuncExpr {
 	}
 }
 
-func addPrefix(prefix string, fields []string) []string {
-	out := make([]string, len(fields))
-	for i, field := range fields {
-		out[i] = prefix + field
-	}
-	return out
-}
-
 func getMaxDatetimeValue() time.Time {
 	t, _ := time.Parse(time.RFC3339, "9999-12-31T23:59:59Z")
 	return t
@@ -141,34 +127,4 @@ func formatComparisonExprStringForError(expr sqlparser.ComparisonExpr) string {
 		expr.Left = newColName(colNameExpr.alias)
 	}
 	return sqlparser.String(&expr)
-}
-
-// Simple tokenizer by spaces. It's a temporary solution as it doesn't cover tokenizer used by
-// PostgreSQL or SQLite.
-func tokenizeTextQueryString(s string) []string {
-	tokens := strings.Split(s, " ")
-	nonEmptyTokens := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		if token != "" {
-			nonEmptyTokens = append(nonEmptyTokens, token)
-		}
-	}
-	return nonEmptyTokens
-}
-
-func getUnsafeStringTupleValues(valTuple sqlparser.ValTuple) ([]string, error) {
-	values := make([]string, len(valTuple))
-	for i, val := range valTuple {
-		switch v := val.(type) {
-		case *unsafeSQLString:
-			values[i] = v.Val
-		default:
-			return nil, query.NewConverterError(
-				"%s: unexpected value type in tuple (expected string, got %v)",
-				query.InvalidExpressionErrMessage,
-				sqlparser.String(v),
-			)
-		}
-	}
-	return values, nil
 }

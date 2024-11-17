@@ -1,5 +1,7 @@
 // The MIT License
 //
+// Copyright (c) 2024 vivaneiona
+//
 // Copyright (c) 2020 Temporal Technologies Inc.  All rights reserved.
 //
 // Copyright (c) 2020 Uber Technologies, Inc.
@@ -22,31 +24,26 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package sql
+package visibility
 
 import (
-	"encoding/json"
-	"time"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/searchattribute"
 )
 
-type (
-	pageToken struct {
-		CloseTime time.Time
-		StartTime time.Time
-		RunID     string
-	}
-)
+type converter struct{}
 
-func deserializePageToken(data []byte) (*pageToken, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	var token *pageToken
-	err := json.Unmarshal(data, &token)
-	return token, err
+func NewParadeDbConverterFactory() QueryConverterFactory {
+	return converter{}
 }
 
-func serializePageToken(token *pageToken) ([]byte, error) {
-	data, err := json.Marshal(token)
-	return data, err
+func (converter) NewQueryConverter(
+	_ string,
+	namespaceName namespace.Name,
+	namespaceID namespace.ID,
+	saTypeMap searchattribute.NameTypeMap,
+	saMapper searchattribute.Mapper,
+	queryString string,
+) Converter {
+	return newParadeDBQueryConverter(namespaceName, namespaceID, saTypeMap, saMapper, queryString)
 }

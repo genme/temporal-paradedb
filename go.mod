@@ -1,6 +1,8 @@
 module github.com/genme/temporal-paradedb
 
-go 1.23.3
+go 1.22.8
+
+toolchain go1.23.3
 
 require (
 	github.com/pborman/uuid v1.2.1
