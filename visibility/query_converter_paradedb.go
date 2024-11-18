@@ -210,7 +210,7 @@ func (c *paradedbQueryConverter) buildSelectStmt(
 
 	// Add namespace filter using ParadeDB term query
 	namespaceFilter := fmt.Sprintf(
-		"search_attributes @@@ paradedb.term('namespace_id', ?)",
+		"search_attributes @@@ paradedb.term('namespace_id', %s)",
 		searchattribute.GetSqlDbColName(searchattribute.NamespaceID),
 	)
 	whereClauses = append(whereClauses, namespaceFilter)

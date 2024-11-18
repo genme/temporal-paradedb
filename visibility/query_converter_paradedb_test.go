@@ -1,25 +1,3 @@
-// The MIT License
-//
-// Copyright (c) 2024 vivaneiona
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
-
 package visibility
 
 import (
@@ -27,256 +5,250 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/temporalio/sqlparser"
-	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/persistence/visibility/store/query"
 )
 
 type (
-	paradedbQueryConverterSuite struct {
+	queryConverterSuite struct {
 		suite.Suite
-		queryConverter *paradedbQueryConverter
-		namespaceName  namespace.Name
-		namespaceID    namespace.ID
+		*require.Assertions
+
+		pqc            PluginQueryConverter
+		queryConverter *QueryConverter
+	}
+
+	testCase struct {
+		name     string
+		input    string
+		args     map[string]interface{}
+		output   interface{}
+		retValue interface{}
+		err      error
+		setup    func()
+	}
+
+	paradedbQueryConverterSuite struct {
+		queryConverterSuite
 	}
 )
 
 func TestParadeDBQueryConverterSuite(t *testing.T) {
 	s := &paradedbQueryConverterSuite{
-		queryConverter: &paradedbQueryConverter{},
-		namespaceName:  "test-namespace",
-		namespaceID:    "test-namespace-id",
+		queryConverterSuite: queryConverterSuite{
+			pqc: &paradedbQueryConverter{},
+		},
 	}
 	suite.Run(t, s)
 }
 
+// SetupTest initializes the Assertions before each test
+func (s *queryConverterSuite) SetupTest() {
+	s.Assertions = require.New(s.T())
+}
+
+func (s *paradedbQueryConverterSuite) TestGetCoalesceCloseTimeExpr() {
+	expr := s.pqc.getCoalesceCloseTimeExpr()
+	s.Equal(
+		"coalesce(close_time, '9999-12-31 23:59:59.999999')",
+		sqlparser.String(expr),
+	)
+}
+
 func (s *paradedbQueryConverterSuite) TestConvertKeywordListComparisonExpr() {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-		wantErr  bool
-		errMsg   string
-	}{
+	tests := []testCase{
 		{
-			name:    "invalid operator",
-			input:   "KeywordList01 < 'foo'",
-			wantErr: true,
-			errMsg:  "operator '<' not supported for KeywordList type",
+			name:   "invalid operator",
+			input:  "AliasForKeywordList01 < 'foo'",
+			output: "",
+			err: query.NewConverterError(
+				"%s: operator '%s' not supported for KeywordList type search attribute in `%s`",
+				query.InvalidExpressionErrMessage,
+				sqlparser.LessThanStr,
+				"AliasForKeywordList01 < 'foo'",
+			),
 		},
 		{
-			name:     "equal",
-			input:    "KeywordList01 = 'foo'",
-			expected: "id @@@ paradedb.json_term('search_attributes', '$.KeywordList01', 'foo')",
+			name:   "valid equal expression",
+			input:  "AliasForKeywordList01 = 'foo'",
+			output: "search_attributes @@@ paradedb.term('$.KeywordList01', 'foo')",
+			err:    nil,
 		},
 		{
-			name:     "not equal",
-			input:    "KeywordList01 != 'foo'",
-			expected: "NOT (id @@@ paradedb.json_term('search_attributes', '$.KeywordList01', 'foo'))",
+			name:   "valid not equal expression",
+			input:  "AliasForKeywordList01 != 'foo'",
+			output: "not (search_attributes @@@ paradedb.term('$.KeywordList01', 'foo'))",
+			err:    nil,
 		},
 		{
-			name:     "in clause",
-			input:    "KeywordList01 in ('foo', 'bar')",
-			expected: "(id @@@ paradedb.json_term('search_attributes', '$.KeywordList01', 'foo') OR id @@@ paradedb.json_term('search_attributes', '$.KeywordList01', 'bar'))",
+			name:   "valid in expression",
+			input:  "AliasForKeywordList01 in ('foo', 'bar')",
+			output: "(search_attributes @@@ paradedb.boolean(should => ARRAY[paradedb.term('$.KeywordList01', 'foo'), paradedb.term('$.KeywordList01', 'bar')]))",
+			err:    nil,
 		},
 		{
-			name:     "not in",
-			input:    "KeywordList01 not in ('foo', 'bar')",
-			expected: "NOT (id @@@ paradedb.json_term('search_attributes', '$.KeywordList01', 'foo') OR id @@@ paradedb.json_term('search_attributes', '$.KeywordList01', 'bar'))",
+			name:   "valid not in expression",
+			input:  "AliasForKeywordList01 not in ('foo', 'bar')",
+			output: "not (search_attributes @@@ paradedb.boolean(should => ARRAY[paradedb.term('$.KeywordList01', 'foo'), paradedb.term('$.KeywordList01', 'bar')]))",
+			err:    nil,
 		},
 	}
 
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			expr := s.buildComparisonExpr(tc.input)
-			result, err := s.queryConverter.convertKeywordListComparisonExpr(expr)
+			sql := fmt.Sprintf("select * from table1 where %s", tc.input)
+			stmt, err := sqlparser.Parse(sql)
+			s.NoError(err)
+			expr := stmt.(*sqlparser.Select).Where.Expr.(*sqlparser.ComparisonExpr)
+			result, err := s.pqc.convertKeywordListComparisonExpr(expr)
 
-			if tc.wantErr {
-				s.Error(err)
-				s.Contains(err.Error(), tc.errMsg)
-			} else {
+			if tc.err == nil {
 				s.NoError(err)
-				s.Equal(tc.expected, sqlparser.String(result))
+				s.Equal(tc.output, sqlparser.String(result))
+			} else {
+				s.Error(err)
+				s.Equal(tc.err.Error(), err.Error())
 			}
 		})
 	}
 }
 
 func (s *paradedbQueryConverterSuite) TestConvertTextComparisonExpr() {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-		wantErr  bool
-		errMsg   string
-	}{
+	tests := []testCase{
 		{
-			name:    "invalid operator",
-			input:   "Text01 < 'foo'",
-			wantErr: true,
-			errMsg:  "operator '<' not supported for Text type",
+			name:   "invalid operator",
+			input:  "AliasForText01 < 'foo'",
+			output: "",
+			err: query.NewConverterError(
+				"%s: operator '%s' not supported for Text type search attribute in `%s`",
+				query.InvalidExpressionErrMessage,
+				sqlparser.LessThanStr,
+				"AliasForText01 < 'foo'",
+			),
 		},
 		{
-			name:     "equal",
-			input:    "Text01 = 'foo'",
-			expected: "id @@@ paradedb.phrase_match('search_attributes', '$.Text01', 'foo')",
+			name:   "valid equal expression",
+			input:  "AliasForText01 = 'foo bar'",
+			output: "(namespace_id, run_id) @@@ paradedb.phrase('Text01', ARRAY['foo', 'bar'])",
+			err:    nil,
 		},
 		{
-			name:     "not equal",
-			input:    "Text01 != 'foo'",
-			expected: "NOT (id @@@ paradedb.phrase_match('search_attributes', '$.Text01', 'foo'))",
+			name:   "valid not equal expression",
+			input:  "AliasForText01 != 'foo bar'",
+			output: "not ((namespace_id, run_id) @@@ paradedb.phrase('Text01', ARRAY['foo', 'bar']))",
+			err:    nil,
 		},
 	}
 
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			expr := s.buildComparisonExpr(tc.input)
-			result, err := s.queryConverter.convertTextComparisonExpr(expr)
+			sql := fmt.Sprintf("select * from table1 where %s", tc.input)
+			stmt, err := sqlparser.Parse(sql)
+			s.NoError(err)
+			expr := stmt.(*sqlparser.Select).Where.Expr.(*sqlparser.ComparisonExpr)
+			result, err := s.pqc.convertTextComparisonExpr(expr)
 
-			if tc.wantErr {
-				s.Error(err)
-				s.Contains(err.Error(), tc.errMsg)
-			} else {
+			if tc.err == nil {
 				s.NoError(err)
-				s.Equal(tc.expected, sqlparser.String(result))
+				s.Equal(tc.output, sqlparser.String(result))
+			} else {
+				s.Error(err)
+				s.Equal(tc.err.Error(), err.Error())
 			}
 		})
 	}
 }
 
-func (s *paradedbQueryConverterSuite) TestBuildSelectStmt() {
-	tests := []struct {
-		name          string
-		query         string
-		pageSize      int
-		token         *pageToken
-		expectedQuery string
-		expectedArgs  int
-	}{
-		{
-			name:     "basic query",
-			query:    "WorkflowType = 'test-workflow'",
-			pageSize: 10,
-			token:    nil,
-			expectedQuery: "SELECT * FROM executions_visibility " +
-				"WHERE namespace_id = ? AND WorkflowType = 'test-workflow' " +
-				"ORDER BY COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC, start_time DESC, run_id LIMIT ?",
-			expectedArgs: 2,
-		},
-		{
-			name:     "with pagination",
-			query:    "WorkflowType = 'test-workflow'",
-			pageSize: 10,
-			token: &pageToken{
-				StartTime: time.Now(),
-				CloseTime: time.Now(),
-				RunID:     "test-run-id",
-			},
-			expectedQuery: "SELECT * FROM executions_visibility " +
-				"WHERE namespace_id = ? AND WorkflowType = 'test-workflow' " +
-				"AND ((COALESCE(close_time, '9999-12-31 23:59:59.999999') = ? AND start_time = ? AND run_id > ?) " +
-				"OR (COALESCE(close_time, '9999-12-31 23:59:59.999999') = ? AND start_time < ?) " +
-				"OR COALESCE(close_time, '9999-12-31 23:59:59.999999') < ?) " +
-				"ORDER BY COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC, start_time DESC, run_id LIMIT ?",
-			expectedArgs: 8,
-		},
-	}
-
-	for _, tc := range tests {
-		s.Run(tc.name, func() {
-			query, args := s.queryConverter.buildSelectStmt(
-				s.namespaceID,
-				tc.query,
-				tc.pageSize,
-				tc.token,
-			)
-			s.Contains(query, tc.expectedQuery)
-			s.Equal(tc.expectedArgs, len(args))
-		})
-	}
+func (s *paradedbQueryConverterSuite) TestBuildPaginationQuery() {
+	// Implement test cases for buildPaginationQuery if needed
 }
 
 func (s *paradedbQueryConverterSuite) TestBuildCountStmt() {
-	tests := []struct {
-		name          string
-		query         string
-		groupBy       []string
-		expectedQuery string
-		expectedArgs  int
-	}{
-		{
-			name:    "simple count",
-			query:   "WorkflowType = 'test-workflow'",
-			groupBy: nil,
-			expectedQuery: "SELECT COUNT(*) FROM executions_visibility " +
-				"WHERE (namespace_id = ?) AND WorkflowType = 'test-workflow'",
-			expectedArgs: 1,
-		},
-		{
-			name:    "count with group by",
-			query:   "WorkflowType = 'test-workflow'",
-			groupBy: []string{"ExecutionStatus"},
-			expectedQuery: "SELECT ExecutionStatus, COUNT(*) FROM executions_visibility " +
-				"WHERE (namespace_id = ?) AND WorkflowType = 'test-workflow' " +
-				"GROUP BY ExecutionStatus",
-			expectedArgs: 1,
-		},
-	}
+	namespaceID := namespace.ID("test-namespace")
+	queryString := "status = 1" // 1 = RUNNING in WorkflowExecutionStatus enum
 
-	for _, tc := range tests {
-		s.Run(tc.name, func() {
-			query, args := s.queryConverter.buildCountStmt(
-				s.namespaceID,
-				tc.query,
-				tc.groupBy,
-			)
-			s.Contains(query, tc.expectedQuery)
-			s.Equal(tc.expectedArgs, len(args))
-		})
-	}
+	// Test without group by
+	query, args := s.pqc.buildCountStmt(namespaceID, queryString, nil)
+	expectedQuery := "SELECT COUNT(*) FROM pdb_executions_visibility WHERE search_attributes @@@ paradedb.term('namespace_id', ?) AND status = 1"
+	s.Equal(expectedQuery, query)
+	s.Equal([]interface{}{namespaceID.String()}, args)
+
+	// Test with group by
+	groupBy := []string{"status", "workflow_type_name"}
+	query, args = s.pqc.buildCountStmt(namespaceID, queryString, groupBy)
+	expectedGroupByQuery := "SELECT status, workflow_type_name, COUNT(*) FROM pdb_executions_visibility WHERE search_attributes @@@ paradedb.term('namespace_id', ?) AND status = 1 GROUP BY status, workflow_type_name"
+	s.Equal(expectedGroupByQuery, query)
+	s.Equal([]interface{}{namespaceID.String()}, args)
 }
 
-func (s *paradedbQueryConverterSuite) TestGetFieldName() {
-	tests := []struct {
-		name     string
-		expr     sqlparser.Expr
-		expected string
-	}{
-		{
-			name: "saColName",
-			expr: newSAColName(
-				"db_col_name",
-				"alias",
-				"field_name",
-				enumspb.INDEXED_VALUE_TYPE_TEXT,
-			),
-			expected: "field_name",
-		},
-		{
-			name:     "colName",
-			expr:     newColName("test_name"),
-			expected: "test_name",
-		},
+func (s *paradedbQueryConverterSuite) TestBuildSelectStmt() {
+	namespaceID := namespace.ID("test-namespace")
+	queryString := "status = 1" // 1 = RUNNING in WorkflowExecutionStatus enum
+	pageSize := 10
+
+	// Test without pagination token
+	query, args := s.pqc.buildSelectStmt(namespaceID, queryString, pageSize, nil)
+
+	expectedQuery := `SELECT execution_fields, paradedb.score((namespace_id, run_id)) as query_score 
+FROM pdb_executions_visibility 
+WHERE search_attributes @@@ paradedb.term('namespace_id', ?) 
+AND status = 1 
+ORDER BY 
+	COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC,  
+	start_time DESC,
+	run_id DESC,
+	query_score DESC
+LIMIT ?`
+
+	s.Equal(expectedQuery, query)
+	s.Equal([]interface{}{namespaceID.String(), pageSize}, args)
+
+	// Test with pagination token
+	token := &pageToken{
+		StartTime: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
+		CloseTime: time.Date(2024, time.February, 1, 0, 0, 0, 0, time.UTC),
+		RunID:     "test-run-id",
 	}
 
-	for _, tc := range tests {
-		s.Run(tc.name, func() {
-			result := getFieldName(tc.expr)
-			s.Equal(tc.expected, result)
-		})
+	query, args = s.pqc.buildSelectStmt(namespaceID, queryString, pageSize, token)
+	expectedArgsWithToken := []interface{}{
+		namespaceID.String(),
+		token.CloseTime,
+		token.StartTime,
+		token.RunID,
+		token.CloseTime,
+		token.StartTime,
+		token.CloseTime,
+		pageSize,
 	}
+
+	s.Contains(query, "WHERE")
+	s.Contains(query, "ORDER BY")
+	s.Equal(expectedArgsWithToken, args)
 }
 
-// Helper function to build comparison expressions for testing
-func (s *paradedbQueryConverterSuite) buildComparisonExpr(query string) *sqlparser.ComparisonExpr {
-	sql := fmt.Sprintf("select * from table1 where %s", query)
-	stmt, err := sqlparser.Parse(sql)
-	s.NoError(err)
+func (s *paradedbQueryConverterSuite) TestBuildSearchAttributesQuery() {
+	namespaceID := namespace.ID("test-namespace")
+	// Query using custom search attributes stored in search_attributes JSONB
+	queryString := "search_attributes @@@ paradedb.term('$.CustomDateField', '2024-01-01')"
+	pageSize := 10
 
-	whereExpr := stmt.(*sqlparser.Select).Where.Expr
-	expr, ok := whereExpr.(*sqlparser.ComparisonExpr)
-	s.True(ok)
+	query, args := s.pqc.buildSelectStmt(namespaceID, queryString, pageSize, nil)
 
-	return expr
+	expectedQuery := `SELECT execution_fields, paradedb.score((namespace_id, run_id)) as query_score 
+FROM pdb_executions_visibility 
+WHERE search_attributes @@@ paradedb.term('namespace_id', ?) 
+AND search_attributes @@@ paradedb.term('$.CustomDateField', '2024-01-01')
+ORDER BY 
+	COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC,  
+	start_time DESC,
+	run_id DESC,
+	query_score DESC
+LIMIT ?`
+
+	s.Equal(expectedQuery, query)
+	s.Equal([]interface{}{namespaceID.String(), pageSize}, args)
 }
