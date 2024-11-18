@@ -36,10 +36,19 @@ type (
 	paradedbQueryConverter struct{}
 )
 
-const (
-	bm25Operator = "@@@"
-)
-
+// newParadeDBQueryConverter creates a new instance of query converter for ParadeDB.
+// This converter translates Temporal visibility queries into ParadeDB-compatible queries
+// that leverage BM25 full-text search capabilities.
+//
+// Parameters:
+//   - namespaceName: Name of the Temporal namespace
+//   - namespaceID: ID of the Temporal namespace
+//   - saTypeMap: Map of search attribute names to their types
+//   - saMapper: Search attribute mapper for alias resolution
+//   - queryString: Original query string to be converted
+//
+// Returns:
+//   - *QueryConverter configured for ParadeDB
 func newParadeDBQueryConverter(
 	namespaceName namespace.Name,
 	namespaceID namespace.ID,
@@ -57,6 +66,15 @@ func newParadeDBQueryConverter(
 	)
 }
 
+// convertKeywordListComparisonExpr converts comparison expressions for KeywordList type search attributes
+// into ParadeDB-compatible queries. It handles equality, inequality, IN, and NOT IN operators.
+//
+// Parameters:
+//   - expr: The comparison expression to convert
+//
+// Returns:
+//   - sqlparser.Expr: Converted expression for ParadeDB
+//   - error: If the operator is not supported or conversion fails
 func (c *paradedbQueryConverter) convertKeywordListComparisonExpr(
 	expr *sqlparser.ComparisonExpr,
 ) (sqlparser.Expr, error) {
@@ -71,7 +89,7 @@ func (c *paradedbQueryConverter) convertKeywordListComparisonExpr(
 
 	switch expr.Operator {
 	case sqlparser.EqualStr, sqlparser.NotEqualStr:
-		newExpr := c.newJsonContainsExpr(expr.Left, expr.Right)
+		newExpr := c.newJsonFieldQuery(expr.Left, expr.Right)
 		if expr.Operator == sqlparser.NotEqualStr {
 			newExpr = &sqlparser.NotExpr{Expr: newExpr}
 		}
@@ -103,32 +121,47 @@ func (c *paradedbQueryConverter) convertKeywordListComparisonExpr(
 	}
 }
 
+// convertInExpr converts IN expressions into a ParadeDB boolean query with should clauses,
+// effectively implementing OR logic between multiple possible values.
+//
+// Parameters:
+//   - leftExpr: The field expression
+//   - values: Tuple of values to match against
+//
+// Returns:
+//   - sqlparser.Expr: ParadeDB boolean query expression
 func (c *paradedbQueryConverter) convertInExpr(
 	leftExpr sqlparser.Expr,
 	values sqlparser.ValTuple,
 ) sqlparser.Expr {
 	exprs := make([]sqlparser.Expr, len(values))
 	for i, value := range values {
-		exprs[i] = c.newJsonContainsExpr(leftExpr, value)
+		exprs[i] = c.newJsonFieldQuery(leftExpr, value)
 	}
-	for len(exprs) > 1 {
-		k := 0
-		for i := 0; i < len(exprs); i += 2 {
-			if i+1 < len(exprs) {
-				exprs[k] = &sqlparser.OrExpr{
-					Left:  exprs[i],
-					Right: exprs[i+1],
-				}
-			} else {
-				exprs[k] = exprs[i]
-			}
-			k++
-		}
-		exprs = exprs[:k]
+
+	// Use ParadeDB boolean query with should clauses for OR operations
+	shouldClauses := make([]string, len(exprs))
+	for i, expr := range exprs {
+		shouldClauses[i] = sqlparser.String(expr)
 	}
-	return exprs[0]
+
+	query := fmt.Sprintf(
+		"id @@@ paradedb.boolean(should => ARRAY[%s])",
+		strings.Join(shouldClauses, ", "),
+	)
+
+	return sqlparser.NewStrVal([]byte(query))
 }
 
+// convertTextComparisonExpr converts text comparison expressions into ParadeDB phrase search queries.
+// This is used for text search attributes and supports equality and inequality operators.
+//
+// Parameters:
+//   - expr: The comparison expression to convert
+//
+// Returns:
+//   - sqlparser.Expr: ParadeDB phrase search expression
+//   - error: If the operator is not supported or conversion fails
 func (c *paradedbQueryConverter) convertTextComparisonExpr(
 	expr *sqlparser.ComparisonExpr,
 ) (sqlparser.Expr, error) {
@@ -141,9 +174,9 @@ func (c *paradedbQueryConverter) convertTextComparisonExpr(
 		)
 	}
 
+	// For text fields, use ParadeDB's phrase search
 	query := fmt.Sprintf(
-		"id %s paradedb.phrase_match('search_attributes', '$.%s', %s)",
-		bm25Operator,
+		"(namespace_id, run_id) @@@ paradedb.phrase('%s', ARRAY[%s])",
 		getFieldName(expr.Left),
 		sqlparser.String(expr.Right),
 	)
@@ -155,6 +188,17 @@ func (c *paradedbQueryConverter) convertTextComparisonExpr(
 	return sqlparser.NewStrVal([]byte(query)), nil
 }
 
+// buildSelectStmt builds a SELECT statement for querying workflow executions with pagination and sorting.
+//
+// Parameters:
+//   - namespaceID: ID of the namespace to filter by
+//   - queryString: Additional query conditions
+//   - pageSize: Maximum number of results to return
+//   - token: Pagination token for continuing from a previous query
+//
+// Returns:
+//   - string: The complete SQL query
+//   - []any: Query parameters to be used with the statement
 func (c *paradedbQueryConverter) buildSelectStmt(
 	namespaceID namespace.ID,
 	queryString string,
@@ -164,10 +208,12 @@ func (c *paradedbQueryConverter) buildSelectStmt(
 	var whereClauses []string
 	var queryArgs []any
 
-	whereClauses = append(
-		whereClauses,
-		fmt.Sprintf("%s = ?", searchattribute.GetSqlDbColName(searchattribute.NamespaceID)),
+	// Add namespace filter using ParadeDB term query
+	namespaceFilter := fmt.Sprintf(
+		"search_attributes @@@ paradedb.term('namespace_id', ?)",
+		searchattribute.GetSqlDbColName(searchattribute.NamespaceID),
 	)
+	whereClauses = append(whereClauses, namespaceFilter)
 	queryArgs = append(queryArgs, namespaceID.String())
 
 	if len(queryString) > 0 {
@@ -175,19 +221,11 @@ func (c *paradedbQueryConverter) buildSelectStmt(
 	}
 
 	if token != nil {
-		// TODO btree indexes
-		whereClauses = append(
-			whereClauses,
-			fmt.Sprintf(
-				"((%s = ? AND %s = ? AND %s > ?) OR (%s = ? AND %s < ?) OR %s < ?)",
-				sqlparser.String(c.getCoalesceCloseTimeExpr()),
-				searchattribute.GetSqlDbColName(searchattribute.StartTime),
-				searchattribute.GetSqlDbColName(searchattribute.RunID),
-				sqlparser.String(c.getCoalesceCloseTimeExpr()),
-				searchattribute.GetSqlDbColName(searchattribute.StartTime),
-				sqlparser.String(c.getCoalesceCloseTimeExpr()),
-			),
+		tokenFilter := fmt.Sprintf(
+			"search_attributes @@@ %s",
+			c.buildPaginationQuery(token),
 		)
+		whereClauses = append(whereClauses, tokenFilter)
 		queryArgs = append(
 			queryArgs,
 			token.CloseTime,
@@ -199,22 +237,40 @@ func (c *paradedbQueryConverter) buildSelectStmt(
 		)
 	}
 
+	// Include score for relevance-based sorting
+	scoreExpr := "paradedb.score((namespace_id, run_id)) as query_score"
+	selectFields := append(sqlplugin.DbFields, scoreExpr)
+
 	queryArgs = append(queryArgs, pageSize)
-	// TODO table name
+
+	// For consistent pagination, we need a deterministic sort order
+	// We use fast fields for efficient sorting
 	return fmt.Sprintf(
-		`SELECT %s
-		FROM executions_visibility
-		WHERE %s
-		ORDER BY %s DESC, %s DESC, %s
+		`SELECT %s 
+		FROM pdb_executions_visibility 
+		WHERE %s 
+		ORDER BY 
+			COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC,  -- Use max datetime for NULL close_time
+			start_time DESC,
+			run_id DESC,
+			query_score DESC
 		LIMIT ?`,
-		strings.Join(sqlplugin.DbFields, ", "),
+		strings.Join(selectFields, ", "),
 		strings.Join(whereClauses, " AND "),
-		sqlparser.String(c.getCoalesceCloseTimeExpr()),
-		searchattribute.GetSqlDbColName(searchattribute.StartTime),
-		searchattribute.GetSqlDbColName(searchattribute.RunID),
 	), queryArgs
 }
 
+// buildCountStmt builds a SELECT COUNT statement for counting workflow executions,
+// optionally with grouping.
+//
+// Parameters:
+//   - namespaceID: ID of the namespace to filter by
+//   - queryString: Additional query conditions
+//   - groupBy: Optional list of fields to group by
+//
+// Returns:
+//   - string: The complete SQL query
+//   - []any: Query parameters to be used with the statement
 func (c *paradedbQueryConverter) buildCountStmt(
 	namespaceID namespace.ID,
 	queryString string,
@@ -223,10 +279,12 @@ func (c *paradedbQueryConverter) buildCountStmt(
 	var whereClauses []string
 	var queryArgs []any
 
-	whereClauses = append(
-		whereClauses,
-		fmt.Sprintf("(%s = ?)", searchattribute.GetSqlDbColName(searchattribute.NamespaceID)),
+	// Add namespace filter using ParadeDB term query
+	namespaceFilter := fmt.Sprintf(
+		"search_attributes @@@ paradedb.term('namespace_id', %s)",
+		searchattribute.GetSqlDbColName(searchattribute.NamespaceID),
 	)
+	whereClauses = append(whereClauses, namespaceFilter)
 	queryArgs = append(queryArgs, namespaceID.String())
 
 	if len(queryString) > 0 {
@@ -239,17 +297,64 @@ func (c *paradedbQueryConverter) buildCountStmt(
 	}
 
 	return fmt.Sprintf(
-		"SELECT %s FROM executions_visibility WHERE %s %s",
+		"SELECT %s FROM pdb_executions_visibility WHERE %s %s",
 		strings.Join(append(groupBy, "COUNT(*)"), ", "),
 		strings.Join(whereClauses, " AND "),
 		groupByClause,
 	), queryArgs
 }
 
+// buildPaginationQuery constructs a ParadeDB query for pagination that maintains correct ordering
+// across multiple pages of results.
+//
+// Parameters:
+//   - token: Pagination token containing the last seen values
+//
+// Returns:
+//   - string: ParadeDB boolean query for pagination
+func (c *paradedbQueryConverter) buildPaginationQuery(token *pageToken) string {
+	// 1. (close_time = token.CloseTime AND start_time = token.StartTime AND run_id > token.RunID) OR
+	// 2. (close_time = token.CloseTime AND start_time < token.StartTime) OR
+	// 3. close_time < token.CloseTime
+	return fmt.Sprintf(`paradedb.boolean(
+        should => ARRAY[
+            paradedb.boolean(
+                must => ARRAY[
+                    paradedb.term('close_time', %s),
+                    paradedb.term('start_time', %s),
+                    paradedb.range('run_id', '(%s, null)')
+                ]
+            ),
+            paradedb.boolean(
+                must => ARRAY[
+                    paradedb.term('close_time', %s),
+                    paradedb.range('start_time', '[null, %s)')
+                ]
+            ),
+            paradedb.range('close_time', '[null, %s)')
+        ]
+    )`,
+		token.CloseTime,
+		token.StartTime,
+		token.RunID,
+		token.CloseTime,
+		token.StartTime,
+		token.CloseTime)
+}
+
+// getDatetimeFormat returns the datetime format string used for timestamp conversions.
+//
+// Returns:
+//   - string: Datetime format string
 func (c *paradedbQueryConverter) getDatetimeFormat() string {
 	return "2006-01-02 15:04:05.999999"
 }
 
+// getCoalesceCloseTimeExpr returns an expression that coalesces NULL close_time values
+// with a maximum datetime value.
+//
+// Returns:
+//   - sqlparser.Expr: Coalesce expression
 func (c *paradedbQueryConverter) getCoalesceCloseTimeExpr() sqlparser.Expr {
 	return newFuncExpr(
 		"COALESCE",
@@ -258,13 +363,21 @@ func (c *paradedbQueryConverter) getCoalesceCloseTimeExpr() sqlparser.Expr {
 	)
 }
 
-func (c *paradedbQueryConverter) newJsonContainsExpr(
+// newJsonFieldQuery creates a ParadeDB term query for JSON field search.
+//
+// Parameters:
+//   - jsonExpr: Expression representing the JSON field to search
+//   - valueExpr: Expression representing the value to search for
+//
+// Returns:
+//   - sqlparser.Expr: ParadeDB term query expression
+func (c *paradedbQueryConverter) newJsonFieldQuery(
 	jsonExpr sqlparser.Expr,
 	valueExpr sqlparser.Expr,
 ) sqlparser.Expr {
+	// Use search_attributes directly since it's a JSONB column in the schema
 	query := fmt.Sprintf(
-		"id %s paradedb.json_term('search_attributes', '$.%s', %s)",
-		bm25Operator,
+		"search_attributes @@@ paradedb.term('$.%s', %s)",
 		getFieldName(jsonExpr),
 		sqlparser.String(valueExpr),
 	)
