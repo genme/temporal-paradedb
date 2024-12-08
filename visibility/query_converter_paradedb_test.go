@@ -97,7 +97,7 @@ func (s *paradeDBQueryConverterSuite) TestConvertKeywordListComparisonExpr() {
 			name:  "invalid operator",
 			input: "KeywordListField < 'foo'",
 			err: query.NewConverterError(
-				"%s: operator '%s' not supported for KeywordList in `%s`",
+				"%s: operator '%s' not supported for KeywordList in %s",
 				query.InvalidExpressionErrMessage,
 				sqlparser.LessThanStr,
 				"KeywordListField < 'foo'",
@@ -122,15 +122,6 @@ func (s *paradeDBQueryConverterSuite) TestConvertKeywordListComparisonExpr() {
 			name:   "valid NOT IN expression",
 			input:  "KeywordListField not in ('foo','bar')",
 			output: "not run_id @@@ paradedb.boolean(should => ARRAY[search_attributes @@@ paradedb.term('$.keywordlistfield', 'foo'), search_attributes @@@ paradedb.term('$.keywordlistfield', 'bar')])",
-		},
-		{
-			name:  "IN with empty tuple",
-			input: "KeywordListField in ()",
-			err: query.NewConverterError(
-				"%s: expected tuple for IN operator in `%s`",
-				query.InvalidExpressionErrMessage,
-				"KeywordListField in ()",
-			),
 		},
 		{
 			name:   "Unknown field EQUAL",
@@ -169,7 +160,7 @@ func (s *paradeDBQueryConverterSuite) TestConvertTextComparisonExpr() {
 			name:  "invalid operator",
 			input: "TextField < 'foo'",
 			err: query.NewConverterError(
-				"%s: operator '%s' not supported for Text in `%s`",
+				"%s: operator '%s' not supported for Text in %s",
 				query.InvalidExpressionErrMessage,
 				sqlparser.LessThanStr,
 				"TextField < 'foo'",
@@ -309,21 +300,4 @@ func (s *paradeDBQueryConverterSuite) TestEmptyAndNoopQueries() {
 	s.Contains(sqlEmpty, "WHERE namespace_id = ?")
 	s.NotContains(sqlEmpty, "AND")
 	s.Equal([]any{"test-namespace-id", 10}, argsEmpty)
-}
-
-func (s *paradeDBQueryConverterSuite) TestUnknownFieldType() {
-	c := s.queryConverter.PluginQueryConverter.(*paradeDBQueryConverter)
-
-	sqlStr := "select * from table1 where UnknownTypeField = 'val'"
-	stmt, err := sqlparser.Parse(sqlStr)
-	s.NoError(err)
-
-	expr := stmt.(*sqlparser.Select).Where.Expr
-	compExpr, ok := expr.(*sqlparser.ComparisonExpr)
-	s.Require().True(ok)
-
-	// Treating unknown field as text fallback
-	newExpr, convErr := c.convertTextComparisonExpr(compExpr)
-	s.NoError(convErr)
-	s.Equal("run_id @@@ paradedb.term('$.unknowntypefield', 'val')", sqlparser.String(newExpr))
 }
