@@ -2,7 +2,7 @@
 
 ## TODO
 
-- [ ] Finalize indexing strategy (pg_search | pg_search + btree)
+- [ ] Finalize indexing strategy 
 - [ ] Finalize query converter
   - [ ] Add comprehensive test suite
   - [ ] Verify all query patterns use ParadeDB indexes

@@ -1,3 +1,4 @@
+-- New schema for Temporal based on extension pg_search from ParadeDB
 CREATE EXTENSION IF NOT EXISTS pg_search;
 
 -- Core executions visibility table

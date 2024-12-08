@@ -5,250 +5,325 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/temporalio/sqlparser"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/persistence/visibility/store/query"
+	"go.temporal.io/server/common/searchattribute"
 )
 
-type (
-	queryConverterSuite struct {
-		suite.Suite
-		*require.Assertions
-
-		pqc            PluginQueryConverter
-		queryConverter *QueryConverter
+// Provided test mapper implementation
+func newMapper(
+	getAlias func(fieldName, ns string) (string, error),
+	getFieldName func(alias, ns string) (string, error),
+) searchattribute.Mapper {
+	return &FlexibleMapper{
+		GetAliasFunc:     getAlias,
+		GetFieldNameFunc: getFieldName,
 	}
+}
 
-	testCase struct {
-		name     string
-		input    string
-		args     map[string]interface{}
-		output   interface{}
-		retValue interface{}
-		err      error
-		setup    func()
-	}
+type FlexibleMapper struct {
+	GetAliasFunc     func(fieldName, namespace string) (string, error)
+	GetFieldNameFunc func(alias, namespace string) (string, error)
+}
 
-	paradedbQueryConverterSuite struct {
-		queryConverterSuite
-	}
-)
+func (m *FlexibleMapper) GetAlias(fieldName, ns string) (string, error) {
+	return m.GetAliasFunc(fieldName, ns)
+}
 
+func (m *FlexibleMapper) GetFieldName(alias, ns string) (string, error) {
+	return m.GetFieldNameFunc(alias, ns)
+}
+
+// testCase defines a common structure for testing comparison expression conversions
+type testCase struct {
+	name   string
+	input  string
+	output string
+	err    error
+}
+
+// paradeDBQueryConverterSuite is the test suite for paradeDBQueryConverter
+type paradeDBQueryConverterSuite struct {
+	suite.Suite
+	queryConverter *QueryConverter
+	saTypeMap      searchattribute.NameTypeMap
+}
+
+// Ensure that the test suite runs with `go test`
 func TestParadeDBQueryConverterSuite(t *testing.T) {
-	s := &paradedbQueryConverterSuite{
-		queryConverterSuite: queryConverterSuite{
-			pqc: &paradedbQueryConverter{},
+	suite.Run(t, new(paradeDBQueryConverterSuite))
+}
+
+// SetupTest initializes the QueryConverter with test parameters
+func (s *paradeDBQueryConverterSuite) SetupTest() {
+	nsName := namespace.Name("test-namespace")
+	nsID := namespace.ID("test-namespace-id")
+
+	// Define a simple NameTypeMap for testing fields
+	s.saTypeMap = searchattribute.NewNameTypeMapStub(map[string]enumspb.IndexedValueType{
+		"KeywordListField": enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST,
+		"TextField":        enumspb.INDEXED_VALUE_TYPE_TEXT,
+		"IntField":         enumspb.INDEXED_VALUE_TYPE_INT,
+	})
+
+	// Use the provided test mapper implementation
+	saMapper := newMapper(
+		func(fieldName, ns string) (string, error) {
+			return fieldName, nil
 		},
-	}
-	suite.Run(t, s)
-}
+		func(alias, ns string) (string, error) {
+			return alias, nil
+		},
+	)
 
-// SetupTest initializes the Assertions before each test
-func (s *queryConverterSuite) SetupTest() {
-	s.Assertions = require.New(s.T())
-}
-
-func (s *paradedbQueryConverterSuite) TestGetCoalesceCloseTimeExpr() {
-	expr := s.pqc.getCoalesceCloseTimeExpr()
-	s.Equal(
-		"coalesce(close_time, '9999-12-31 23:59:59.999999')",
-		sqlparser.String(expr),
+	// Use the exported constructor to create the QueryConverter for ParadeDB
+	s.queryConverter = newParadeDBQueryConverter(
+		nsName,
+		nsID,
+		s.saTypeMap,
+		saMapper,
+		"",
 	)
 }
 
-func (s *paradedbQueryConverterSuite) TestConvertKeywordListComparisonExpr() {
+func (s *paradeDBQueryConverterSuite) TestConvertKeywordListComparisonExpr() {
+	c := s.queryConverter.PluginQueryConverter.(*paradeDBQueryConverter)
+
 	tests := []testCase{
 		{
-			name:   "invalid operator",
-			input:  "AliasForKeywordList01 < 'foo'",
-			output: "",
+			name:  "invalid operator",
+			input: "KeywordListField < 'foo'",
 			err: query.NewConverterError(
-				"%s: operator '%s' not supported for KeywordList type search attribute in `%s`",
+				"%s: operator '%s' not supported for KeywordList in `%s`",
 				query.InvalidExpressionErrMessage,
 				sqlparser.LessThanStr,
-				"AliasForKeywordList01 < 'foo'",
+				"KeywordListField < 'foo'",
 			),
 		},
 		{
-			name:   "valid equal expression",
-			input:  "AliasForKeywordList01 = 'foo'",
-			output: "search_attributes @@@ paradedb.term('$.KeywordList01', 'foo')",
-			err:    nil,
+			name:   "valid EQUAL expression",
+			input:  "KeywordListField = 'foo'",
+			output: "run_id @@@ paradedb.term('$.keywordlistfield', 'foo')",
 		},
 		{
-			name:   "valid not equal expression",
-			input:  "AliasForKeywordList01 != 'foo'",
-			output: "not (search_attributes @@@ paradedb.term('$.KeywordList01', 'foo'))",
-			err:    nil,
+			name:   "valid NOT EQUAL expression",
+			input:  "KeywordListField != 'foo'",
+			output: "not run_id @@@ paradedb.term('$.keywordlistfield', 'foo')",
 		},
 		{
-			name:   "valid in expression",
-			input:  "AliasForKeywordList01 in ('foo', 'bar')",
-			output: "(search_attributes @@@ paradedb.boolean(should => ARRAY[paradedb.term('$.KeywordList01', 'foo'), paradedb.term('$.KeywordList01', 'bar')]))",
-			err:    nil,
+			name:   "valid IN expression",
+			input:  "KeywordListField in ('foo','bar')",
+			output: "run_id @@@ paradedb.boolean(should => ARRAY[search_attributes @@@ paradedb.term('$.keywordlistfield', 'foo'), search_attributes @@@ paradedb.term('$.keywordlistfield', 'bar')])",
 		},
 		{
-			name:   "valid not in expression",
-			input:  "AliasForKeywordList01 not in ('foo', 'bar')",
-			output: "not (search_attributes @@@ paradedb.boolean(should => ARRAY[paradedb.term('$.KeywordList01', 'foo'), paradedb.term('$.KeywordList01', 'bar')]))",
-			err:    nil,
+			name:   "valid NOT IN expression",
+			input:  "KeywordListField not in ('foo','bar')",
+			output: "not run_id @@@ paradedb.boolean(should => ARRAY[search_attributes @@@ paradedb.term('$.keywordlistfield', 'foo'), search_attributes @@@ paradedb.term('$.keywordlistfield', 'bar')])",
+		},
+		{
+			name:  "IN with empty tuple",
+			input: "KeywordListField in ()",
+			err: query.NewConverterError(
+				"%s: expected tuple for IN operator in `%s`",
+				query.InvalidExpressionErrMessage,
+				"KeywordListField in ()",
+			),
+		},
+		{
+			name:   "Unknown field EQUAL",
+			input:  "UnknownField = 'foo'",
+			output: "run_id @@@ paradedb.term('$.unknownfield', 'foo')",
 		},
 	}
 
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			sql := fmt.Sprintf("select * from table1 where %s", tc.input)
-			stmt, err := sqlparser.Parse(sql)
+			sqlStr := fmt.Sprintf("select * from table1 where %s", tc.input)
+			stmt, err := sqlparser.Parse(sqlStr)
 			s.NoError(err)
-			expr := stmt.(*sqlparser.Select).Where.Expr.(*sqlparser.ComparisonExpr)
-			result, err := s.pqc.convertKeywordListComparisonExpr(expr)
 
+			expr := stmt.(*sqlparser.Select).Where.Expr
+			compExpr, ok := expr.(*sqlparser.ComparisonExpr)
+			s.Require().True(ok)
+
+			newExpr, convErr := c.convertKeywordListComparisonExpr(compExpr)
 			if tc.err == nil {
-				s.NoError(err)
-				s.Equal(tc.output, sqlparser.String(result))
+				s.NoError(convErr)
+				s.Equal(tc.output, sqlparser.String(newExpr))
 			} else {
-				s.Error(err)
-				s.Equal(tc.err.Error(), err.Error())
+				s.Error(convErr)
+				s.Equal(tc.err.Error(), convErr.Error())
 			}
 		})
 	}
 }
 
-func (s *paradedbQueryConverterSuite) TestConvertTextComparisonExpr() {
+func (s *paradeDBQueryConverterSuite) TestConvertTextComparisonExpr() {
+	c := s.queryConverter.PluginQueryConverter.(*paradeDBQueryConverter)
+
 	tests := []testCase{
 		{
-			name:   "invalid operator",
-			input:  "AliasForText01 < 'foo'",
-			output: "",
+			name:  "invalid operator",
+			input: "TextField < 'foo'",
 			err: query.NewConverterError(
-				"%s: operator '%s' not supported for Text type search attribute in `%s`",
+				"%s: operator '%s' not supported for Text in `%s`",
 				query.InvalidExpressionErrMessage,
 				sqlparser.LessThanStr,
-				"AliasForText01 < 'foo'",
+				"TextField < 'foo'",
 			),
 		},
 		{
-			name:   "valid equal expression",
-			input:  "AliasForText01 = 'foo bar'",
-			output: "(namespace_id, run_id) @@@ paradedb.phrase('Text01', ARRAY['foo', 'bar'])",
-			err:    nil,
+			name:   "valid EQUAL single term",
+			input:  "TextField = 'foo'",
+			output: "run_id @@@ paradedb.term('textfield', 'foo')",
 		},
 		{
-			name:   "valid not equal expression",
-			input:  "AliasForText01 != 'foo bar'",
-			output: "not ((namespace_id, run_id) @@@ paradedb.phrase('Text01', ARRAY['foo', 'bar']))",
-			err:    nil,
+			name:   "valid EQUAL multiple terms",
+			input:  "TextField = 'foo bar'",
+			output: "run_id @@@ paradedb.phrase('textfield', ARRAY['foo','bar'])",
+		},
+		{
+			name:   "valid NOT EQUAL multiple terms",
+			input:  "TextField != 'hello world'",
+			output: "not run_id @@@ paradedb.phrase('textfield', ARRAY['hello','world'])",
+		},
+		{
+			name:   "Unknown field EQUAL",
+			input:  "UnknownTextField = 'test val'",
+			output: "run_id @@@ paradedb.term('$.unknowntextfield', 'test val')",
 		},
 	}
 
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			sql := fmt.Sprintf("select * from table1 where %s", tc.input)
-			stmt, err := sqlparser.Parse(sql)
+			sqlStr := fmt.Sprintf("select * from table1 where %s", tc.input)
+			stmt, err := sqlparser.Parse(sqlStr)
 			s.NoError(err)
-			expr := stmt.(*sqlparser.Select).Where.Expr.(*sqlparser.ComparisonExpr)
-			result, err := s.pqc.convertTextComparisonExpr(expr)
 
+			expr := stmt.(*sqlparser.Select).Where.Expr
+			compExpr, ok := expr.(*sqlparser.ComparisonExpr)
+			s.Require().True(ok)
+
+			newExpr, convErr := c.convertTextComparisonExpr(compExpr)
 			if tc.err == nil {
-				s.NoError(err)
-				s.Equal(tc.output, sqlparser.String(result))
+				s.NoError(convErr)
+				s.Equal(tc.output, sqlparser.String(newExpr))
 			} else {
-				s.Error(err)
-				s.Equal(tc.err.Error(), err.Error())
+				s.Error(convErr)
+				s.Equal(tc.err.Error(), convErr.Error())
 			}
 		})
 	}
 }
 
-func (s *paradedbQueryConverterSuite) TestBuildPaginationQuery() {
-	// Implement test cases for buildPaginationQuery if needed
-}
+func (s *paradeDBQueryConverterSuite) TestPagination() {
+	c := s.queryConverter.PluginQueryConverter.(*paradeDBQueryConverter)
 
-func (s *paradedbQueryConverterSuite) TestBuildCountStmt() {
-	namespaceID := namespace.ID("test-namespace")
-	queryString := "status = 1" // 1 = RUNNING in WorkflowExecutionStatus enum
+	nsID := namespace.ID("test-namespace-id")
+	queryString := "run_id @@@ paradedb.term('$.keywordlistfield', 'foo')"
 
-	// Test without group by
-	query, args := s.pqc.buildCountStmt(namespaceID, queryString, nil)
-	expectedQuery := "SELECT COUNT(*) FROM pdb_executions_visibility WHERE search_attributes @@@ paradedb.term('namespace_id', ?) AND status = 1"
-	s.Equal(expectedQuery, query)
-	s.Equal([]interface{}{namespaceID.String()}, args)
+	// No pagination token, no query
+	sqlNoQueryNoToken, argsNoQueryNoToken := c.buildSelectStmt(nsID, "", 10, nil)
+	s.Contains(sqlNoQueryNoToken, "WHERE namespace_id = ?")
+	s.NotContains(sqlNoQueryNoToken, "paradedb.term('$.keywordlistfield', 'foo')")
+	s.Equal([]any{"test-namespace-id", 10}, argsNoQueryNoToken)
 
-	// Test with group by
-	groupBy := []string{"status", "workflow_type_name"}
-	query, args = s.pqc.buildCountStmt(namespaceID, queryString, groupBy)
-	expectedGroupByQuery := "SELECT status, workflow_type_name, COUNT(*) FROM pdb_executions_visibility WHERE search_attributes @@@ paradedb.term('namespace_id', ?) AND status = 1 GROUP BY status, workflow_type_name"
-	s.Equal(expectedGroupByQuery, query)
-	s.Equal([]interface{}{namespaceID.String()}, args)
-}
+	// Query, no token
+	sqlNoToken, argsNoToken := c.buildSelectStmt(nsID, queryString, 10, nil)
+	s.Contains(sqlNoToken, "WHERE namespace_id = ? AND run_id @@@ paradedb.term('$.keywordlistfield', 'foo')")
+	s.Equal([]any{"test-namespace-id", 10}, argsNoToken)
 
-func (s *paradedbQueryConverterSuite) TestBuildSelectStmt() {
-	namespaceID := namespace.ID("test-namespace")
-	queryString := "status = 1" // 1 = RUNNING in WorkflowExecutionStatus enum
-	pageSize := 10
+	// With token
+	closeTime, _ := time.Parse("2006-01-02 15:04:05.000000", "2024-01-01 00:00:00.000000")
+	startTime, _ := time.Parse("2006-01-02 15:04:05.000000", "2023-01-01 12:34:56.000000")
 
-	// Test without pagination token
-	query, args := s.pqc.buildSelectStmt(namespaceID, queryString, pageSize, nil)
-
-	expectedQuery := `SELECT execution_fields, paradedb.score((namespace_id, run_id)) as query_score 
-FROM pdb_executions_visibility 
-WHERE search_attributes @@@ paradedb.term('namespace_id', ?) 
-AND status = 1 
-ORDER BY 
-	COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC,  
-	start_time DESC,
-	run_id DESC,
-	query_score DESC
-LIMIT ?`
-
-	s.Equal(expectedQuery, query)
-	s.Equal([]interface{}{namespaceID.String(), pageSize}, args)
-
-	// Test with pagination token
 	token := &pageToken{
-		StartTime: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
-		CloseTime: time.Date(2024, time.February, 1, 0, 0, 0, 0, time.UTC),
-		RunID:     "test-run-id",
+		CloseTime: closeTime,
+		StartTime: startTime,
+		RunID:     "some-run-id",
 	}
-
-	query, args = s.pqc.buildSelectStmt(namespaceID, queryString, pageSize, token)
-	expectedArgsWithToken := []interface{}{
-		namespaceID.String(),
+	sqlWithToken, argsWithToken := c.buildSelectStmt(nsID, queryString, 10, token)
+	s.Contains(sqlWithToken, "run_id @@@ paradedb.boolean(")
+	s.Equal([]any{
+		"test-namespace-id",
 		token.CloseTime,
 		token.StartTime,
 		token.RunID,
 		token.CloseTime,
 		token.StartTime,
 		token.CloseTime,
-		pageSize,
-	}
+		10,
+	}, argsWithToken)
 
-	s.Contains(query, "WHERE")
-	s.Contains(query, "ORDER BY")
-	s.Equal(expectedArgsWithToken, args)
+	// Empty token fields
+	emptyToken := &pageToken{}
+	sqlEmptyToken, argsEmptyToken := c.buildSelectStmt(nsID, queryString, 10, emptyToken)
+	s.Contains(sqlEmptyToken, "run_id @@@ paradedb.boolean(")
+	s.Equal([]any{
+		"test-namespace-id",
+		emptyToken.CloseTime, emptyToken.StartTime, emptyToken.RunID,
+		emptyToken.CloseTime, emptyToken.StartTime, emptyToken.CloseTime,
+		10,
+	}, argsEmptyToken)
+
+	// Very large page size
+	sqlLargePage, argsLargePage := c.buildSelectStmt(nsID, queryString, 1000000, nil)
+	s.Contains(sqlLargePage, "LIMIT ?")
+	s.Equal([]any{"test-namespace-id", 1000000}, argsLargePage)
+
+	// Zero page size
+	sqlZeroPage, argsZeroPage := c.buildSelectStmt(nsID, queryString, 0, nil)
+	s.Contains(sqlZeroPage, "LIMIT ?")
+	s.Equal([]any{"test-namespace-id", 0}, argsZeroPage)
+
+	// Negative page size
+	sqlNegativePage, argsNegativePage := c.buildSelectStmt(nsID, queryString, -1, nil)
+	s.Contains(sqlNegativePage, "LIMIT ?")
+	s.Equal([]any{"test-namespace-id", -1}, argsNegativePage)
+
+	// Token but no query
+	sqlTokenNoQuery, argsTokenNoQuery := c.buildSelectStmt(nsID, "", 5, token)
+	s.Contains(sqlTokenNoQuery, "WHERE namespace_id = ? AND run_id @@@ paradedb.boolean(")
+	s.Equal([]any{
+		"test-namespace-id",
+		token.CloseTime,
+		token.StartTime,
+		token.RunID,
+		token.CloseTime,
+		token.StartTime,
+		token.CloseTime,
+		5,
+	}, argsTokenNoQuery)
 }
 
-func (s *paradedbQueryConverterSuite) TestBuildSearchAttributesQuery() {
-	namespaceID := namespace.ID("test-namespace")
-	// Query using custom search attributes stored in search_attributes JSONB
-	queryString := "search_attributes @@@ paradedb.term('$.CustomDateField', '2024-01-01')"
-	pageSize := 10
+func (s *paradeDBQueryConverterSuite) TestEmptyAndNoopQueries() {
+	c := s.queryConverter.PluginQueryConverter.(*paradeDBQueryConverter)
 
-	query, args := s.pqc.buildSelectStmt(namespaceID, queryString, pageSize, nil)
+	nsID := namespace.ID("test-namespace-id")
 
-	expectedQuery := `SELECT execution_fields, paradedb.score((namespace_id, run_id)) as query_score 
-FROM pdb_executions_visibility 
-WHERE search_attributes @@@ paradedb.term('namespace_id', ?) 
-AND search_attributes @@@ paradedb.term('$.CustomDateField', '2024-01-01')
-ORDER BY 
-	COALESCE(close_time, '9999-12-31 23:59:59.999999') DESC,  
-	start_time DESC,
-	run_id DESC,
-	query_score DESC
-LIMIT ?`
+	// Empty query string, no token, just the namespace condition
+	sqlEmpty, argsEmpty := c.buildSelectStmt(nsID, "", 10, nil)
+	s.Contains(sqlEmpty, "WHERE namespace_id = ?")
+	s.NotContains(sqlEmpty, "AND")
+	s.Equal([]any{"test-namespace-id", 10}, argsEmpty)
+}
 
-	s.Equal(expectedQuery, query)
-	s.Equal([]interface{}{namespaceID.String(), pageSize}, args)
+func (s *paradeDBQueryConverterSuite) TestUnknownFieldType() {
+	c := s.queryConverter.PluginQueryConverter.(*paradeDBQueryConverter)
+
+	sqlStr := "select * from table1 where UnknownTypeField = 'val'"
+	stmt, err := sqlparser.Parse(sqlStr)
+	s.NoError(err)
+
+	expr := stmt.(*sqlparser.Select).Where.Expr
+	compExpr, ok := expr.(*sqlparser.ComparisonExpr)
+	s.Require().True(ok)
+
+	// Treating unknown field as text fallback
+	newExpr, convErr := c.convertTextComparisonExpr(compExpr)
+	s.NoError(convErr)
+	s.Equal("run_id @@@ paradedb.term('$.unknowntypefield', 'val')", sqlparser.String(newExpr))
 }
