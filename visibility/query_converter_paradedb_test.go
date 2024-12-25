@@ -37,7 +37,7 @@ func (m *FlexibleMapper) GetFieldName(alias, ns string) (string, error) {
 	return m.GetFieldNameFunc(alias, ns)
 }
 
-// testCase defines a common structure for testing comparison expression conversions
+// testCase defines a common structure for testing comparison sqlparser conversions
 type testCase struct {
 	name   string
 	input  string
@@ -104,22 +104,22 @@ func (s *paradeDBQueryConverterSuite) TestConvertKeywordListComparisonExpr() {
 			),
 		},
 		{
-			name:   "valid EQUAL expression",
+			name:   "valid EQUAL sqlparser",
 			input:  "KeywordListField = 'foo'",
 			output: "run_id @@@ paradedb.term('$.keywordlistfield', 'foo')",
 		},
 		{
-			name:   "valid NOT EQUAL expression",
+			name:   "valid NOT EQUAL sqlparser",
 			input:  "KeywordListField != 'foo'",
 			output: "not run_id @@@ paradedb.term('$.keywordlistfield', 'foo')",
 		},
 		{
-			name:   "valid IN expression",
+			name:   "valid IN sqlparser",
 			input:  "KeywordListField in ('foo','bar')",
 			output: "run_id @@@ paradedb.boolean(should => ARRAY[search_attributes @@@ paradedb.term('$.keywordlistfield', 'foo'), search_attributes @@@ paradedb.term('$.keywordlistfield', 'bar')])",
 		},
 		{
-			name:   "valid NOT IN expression",
+			name:   "valid NOT IN sqlparser",
 			input:  "KeywordListField not in ('foo','bar')",
 			output: "not run_id @@@ paradedb.boolean(should => ARRAY[search_attributes @@@ paradedb.term('$.keywordlistfield', 'foo'), search_attributes @@@ paradedb.term('$.keywordlistfield', 'bar')])",
 		},
