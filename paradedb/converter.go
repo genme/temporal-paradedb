@@ -1,12 +1,24 @@
-// File: converter.go
+// The MIT License
 //
-// The ExpressionConverter converts parsed SQL expressions (using the "sqlparser" library)
-// into ParadeDB-compatible query strings. It interprets basic SQL operations (AND, OR, NOT,
-// IS NULL, comparison operators, etc.) and uses builder functions (from builder.go and related files)
-// to produce ParadeDB queries.
+// Copyright (c) 2024 vivaneiona
 //
-// By utilizing the sugar functions (BuildMust, BuildShould, BuildMustNot, etc.), we simplify
-// the construction of boolean queries while preserving functionality and readability.
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 
 package paradedb
 
@@ -61,6 +73,17 @@ func (c *ExpressionConverter) ToParadeDBQuery(expr sqlparser.Expr) (string, erro
 		return c.convertBoolVal(e), nil
 	case *sqlparser.NullVal:
 		return "null", nil
+	case sqlparser.ValTuple:
+		// Handle IN lists
+		var results []string
+		for _, ex := range e {
+			s, err := c.ToParadeDBQuery(ex)
+			if err != nil {
+				return "", err
+			}
+			results = append(results, s)
+		}
+		return strings.Join(results, ","), nil
 	default:
 		return "", fmt.Errorf("unsupported sqlparser type: %T", expr)
 	}
@@ -69,43 +92,60 @@ func (c *ExpressionConverter) ToParadeDBQuery(expr sqlparser.Expr) (string, erro
 // convertAndExpr handles logical AND. It constructs a ParadeDB boolean query
 // that must match both sides.
 func (c *ExpressionConverter) convertAndExpr(e *sqlparser.AndExpr) (string, error) {
-	left, err := c.ToParadeDBQuery(e.Left)
+	leftExpr, err := c.convertComparisonToFuncExpr(e.Left)
 	if err != nil {
 		return "", err
 	}
-	right, err := c.ToParadeDBQuery(e.Right)
+	rightExpr, err := c.convertComparisonToFuncExpr(e.Right)
 	if err != nil {
 		return "", err
 	}
-	leftExpr := BuildTermExpr("expr", left)
-	rightExpr := BuildTermExpr("expr", right)
 	return c.funcExprToString(BuildMust(leftExpr, rightExpr))
 }
 
 // convertOrExpr handles logical OR. It constructs a ParadeDB boolean query
 // that should match either side.
 func (c *ExpressionConverter) convertOrExpr(e *sqlparser.OrExpr) (string, error) {
-	left, err := c.ToParadeDBQuery(e.Left)
+	leftExpr, err := c.convertComparisonToFuncExpr(e.Left)
 	if err != nil {
 		return "", err
 	}
-	right, err := c.ToParadeDBQuery(e.Right)
+	rightExpr, err := c.convertComparisonToFuncExpr(e.Right)
 	if err != nil {
 		return "", err
 	}
-	leftExpr := BuildTermExpr("expr", left)
-	rightExpr := BuildTermExpr("expr", right)
 	return c.funcExprToString(BuildShould(leftExpr, rightExpr))
+}
+
+// convertComparisonToFuncExpr converts a comparison expression to a ParadeDB function expression.
+func (c *ExpressionConverter) convertComparisonToFuncExpr(expr sqlparser.Expr) (*sqlparser.FuncExpr, error) {
+	switch e := expr.(type) {
+	case *sqlparser.ComparisonExpr:
+		left, err := c.ToParadeDBQuery(e.Left)
+		if err != nil {
+			return nil, err
+		}
+		right, err := c.ToParadeDBQuery(e.Right)
+		if err != nil {
+			return nil, err
+		}
+		return BuildTermExpr(left, right), nil
+	default:
+		str, err := c.ToParadeDBQuery(expr)
+		if err != nil {
+			return nil, err
+		}
+		return BuildTermExpr("col", str), nil
+	}
 }
 
 // convertNotExpr handles logical NOT. It negates the inner sqlparser
 // using a must_not clause.
 func (c *ExpressionConverter) convertNotExpr(e *sqlparser.NotExpr) (string, error) {
-	inner, err := c.ToParadeDBQuery(e.Expr)
+	innerExpr, err := c.convertComparisonToFuncExpr(e.Expr)
 	if err != nil {
 		return "", err
 	}
-	innerExpr := BuildTermExpr("expr", inner)
 	return c.funcExprToString(BuildMustNot(innerExpr))
 }
 
@@ -146,7 +186,11 @@ func (c *ExpressionConverter) convertComparison(e *sqlparser.ComparisonExpr) (st
 		return c.funcExprToString(likeExpr)
 	case sqlparser.GreaterThanStr, sqlparser.GreaterEqualStr,
 		sqlparser.LessThanStr, sqlparser.LessEqualStr:
-		return c.funcExprToString(BuildRangeExpr(left, right, operator))
+		rangeExpr := BuildRangeExpr(left, right, operator)
+		if funcExpr, ok := rangeExpr.(*sqlparser.FuncExpr); ok {
+			return c.funcExprToString(funcExpr)
+		}
+		return "", fmt.Errorf("failed to convert range expression to FuncExpr")
 	default:
 		return "", fmt.Errorf("operator '%s' not supported", operator)
 	}
@@ -162,15 +206,11 @@ func (c *ExpressionConverter) convertIsExpr(e *sqlparser.IsExpr) (string, error)
 	switch e.Operator {
 	case sqlparser.IsNullStr:
 		// IS NULL can be represented as a scenario where the field must NOT exist.
-		// BuildExists(left) creates paradedb.exists(...)
-		// BuildMustNot(...) creates a must_not boolean sqlparser
-		// BuildAll(...) wraps them, ensuring the condition is treated as a single combined sqlparser.
-		return c.funcExprToString(BuildAll(BuildMustNot(BuildExists(left))))
+		return c.funcExprToString(BuildMustNot(BuildExists(left)))
 
 	case sqlparser.IsNotNullStr:
 		// IS NOT NULL is a scenario where the field must exist.
-		// Again, use BuildAll(...) for consistency and flexibility.
-		return c.funcExprToString(BuildAll(BuildExists(left)))
+		return c.funcExprToString(BuildExists(left))
 
 	default:
 		return "", fmt.Errorf("IS operator '%s' not supported", e.Operator)

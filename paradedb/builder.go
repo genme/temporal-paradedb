@@ -24,6 +24,7 @@ package paradedb
 
 import (
 	"fmt"
+
 	"github.com/temporalio/sqlparser"
 )
 
@@ -56,11 +57,25 @@ func (node *ArrayExpr) replace(from, to sqlparser.Expr) bool {
 	return false
 }
 
-// newUnsafeSQLString creates a SQLVal node of type StrVal from a string.
+// unescapedSQLString is a custom type that implements SQLNode interface
+// to handle strings without escaping quotes.
+type unescapedSQLString struct {
+	sqlparser.Expr
+	val string
+}
+
+// Format implements the SQLNode interface.
+func (node *unescapedSQLString) Format(buf *sqlparser.TrackedBuffer) {
+	buf.WriteString("'")
+	buf.WriteString(node.val)
+	buf.WriteString("'")
+}
+
+// newUnsafeSQLString creates an unescaped string node.
 // This should be used for values known to be safe, as it doesn't perform
 // additional escaping beyond simple quoting.
-func newUnsafeSQLString(s string) *sqlparser.SQLVal {
-	return &sqlparser.SQLVal{Type: sqlparser.StrVal, Val: []byte(s)}
+func newUnsafeSQLString(s string) sqlparser.Expr {
+	return &unescapedSQLString{val: s}
 }
 
 // newFuncExpr creates a FuncExpr with the given name and a variadic list of Expr arguments.
@@ -105,17 +120,12 @@ func namedArrayParam(name string, exprs sqlparser.Exprs) sqlparser.Expr {
 
 // BuildExists returns a paradedb.exists(...) function call for checking a field's existence.
 func BuildExists(field string) *sqlparser.FuncExpr {
-	return newFuncExprWithNamedParams("paradedb.exists", map[string]sqlparser.Expr{
-		"field": newUnsafeSQLString(field),
-	})
+	return newFuncExpr("paradedb.exists", newUnsafeSQLString(field))
 }
 
 // BuildRegex returns a paradedb.regex(...) function call to match a field against a pattern.
 func BuildRegex(field string, pattern string) *sqlparser.FuncExpr {
-	return newFuncExprWithNamedParams("paradedb.regex", map[string]sqlparser.Expr{
-		"field":   newUnsafeSQLString(field),
-		"pattern": newUnsafeSQLString(field),
-	})
+	return newFuncExpr("paradedb.regex", newUnsafeSQLString(field), newUnsafeSQLString(pattern))
 }
 
 // BuildTermSet returns a paradedb.term_set(...) function call with a set of terms.
@@ -128,10 +138,7 @@ func BuildTermSet(terms ...sqlparser.Expr) *sqlparser.FuncExpr {
 
 // BuildTermExpr returns a paradedb.term(...) function call.
 func BuildTermExpr(field string, value string) *sqlparser.FuncExpr {
-	return newFuncExprWithNamedParams("paradedb.term", map[string]sqlparser.Expr{
-		"field": newUnsafeSQLString(field),
-		"value": newUnsafeSQLString(value),
-	})
+	return newFuncExpr("paradedb.term", newUnsafeSQLString(field), newUnsafeSQLString(value))
 }
 
 // buildBooleanArrayParam constructs a paradedb.boolean(...) with a paramName => ARRAY[...].
@@ -234,4 +241,41 @@ func BuildBetweenBounds(field, lower, upper sqlparser.Expr, bounds string) sqlpa
 			Val:  []byte(rangeStr),
 		},
 	}
+}
+
+// BuildRangeExpr returns a paradedb.range(...) function call for numeric comparisons.
+func BuildRangeExpr(field string, value string, operator string) sqlparser.Expr {
+	var rangeStr string
+	switch operator {
+	case ">":
+		rangeStr = fmt.Sprintf(`("` + value + `", null)`)
+	case ">=":
+		rangeStr = fmt.Sprintf(`["` + value + `", null)`)
+	case "<":
+		rangeStr = fmt.Sprintf(`(null, "` + value + `")`)
+	case "<=":
+		rangeStr = fmt.Sprintf(`(null, "` + value + `"]`)
+	}
+
+	return newFuncExpr("paradedb.range", newUnsafeSQLString(field), newUnsafeSQLString(rangeStr))
+}
+
+// BuildRangeGreaterThan creates a range expression for field > value
+func BuildRangeGreaterThan(field string, value string) sqlparser.Expr {
+	return BuildRangeExpr(field, value, ">")
+}
+
+// BuildRangeGreaterThanOrEqual creates a range expression for field >= value
+func BuildRangeGreaterThanOrEqual(field string, value string) sqlparser.Expr {
+	return BuildRangeExpr(field, value, ">=")
+}
+
+// BuildRangeLessThan creates a range expression for field < value
+func BuildRangeLessThan(field string, value string) sqlparser.Expr {
+	return BuildRangeExpr(field, value, "<")
+}
+
+// BuildRangeLessThanOrEqual creates a range expression for field <= value
+func BuildRangeLessThanOrEqual(field string, value string) sqlparser.Expr {
+	return BuildRangeExpr(field, value, "<=")
 }
